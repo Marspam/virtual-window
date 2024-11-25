@@ -1,7 +1,7 @@
 #!/usr/bin/env python 
 from VideoStream import VideoStream 
 from Tracker import Tracker
-from KalmanFilter import KalmanFilter
+from OneEuroFilter import OneEuroFilter
 import signal
 import os 
 import sys
@@ -45,8 +45,6 @@ def get_depth_layers(depth_map):
  
     return layers
     
-    
-
 def extension_check(param):
     base,ext = os.path.splitext(param)
     if ext.lower() not in ('.jpg', '.png'):
@@ -56,19 +54,32 @@ def extension_check(param):
 def argument_handler():
     parser = argparse.ArgumentParser(prog="Virtual window", description="User inputs an image and the program tracks the movement of his face to adjust the image creating a \"Window effect\" ")
     parser.add_argument("-i" , type= extension_check, help="image input", required=True)
+    parser.add_argument("-v", help="show tracking output of camera", required=False, action='store_true')
+    parser.add_argument("-s", type = int, default = 0, help="Change input camera source index if using multiple camera on system, default is zero", required=False)
     args = parser.parse_args()
     return args
 
-base_z = 30
-first = True
-d1 = base_z
-d2 = d1
-d3 = d1
-kf = KalmanFilter()
+def ema_filter(current_head_z):
+    global prev_head_z
+    filtered_head_z = alpha * current_head_z + (1 - alpha) * prev_head_z
+    prev_head_z = filtered_head_z
+    return filtered_head_z
+
+base_z = 35
+starttime = time.time()
+min_cutoff = 0.004 #cutoff freq
+alpha = 0.2 #ema smoothing factor
+beta = 0.8 #euro smoothing factor
+first_head_z = 0
+prev_head_z = 0
+
 def main():  
     try:
-        stream = VideoStream().start()
+        stream = VideoStream(argument_handler().s)
+        stream.start()
         tracker = Tracker(stream.frame).start() 
+        if argument_handler().v:
+            tracker.set_show_frames()
         first = True
         running = True
         while running:
@@ -80,34 +91,30 @@ def main():
             time.sleep(0.001) 
             tracker.frame = frame
             head_coords = tracker.get_head_coords() 
-            head_x,head_y,head_z= head_coords[0], head_coords[1],head_coords[2] #nose x, y and distance 
+            head_x,head_y,head_z= head_coords[0], head_coords[1],head_coords[2] #nose x, y and distance             
+                
             if first:
-                d1 = head_z
-                d2 = head_z
-                d3 = head_z
+                first_head_z = head_z
+                first = False
+            one_euro_filter = OneEuroFilter(starttime, first_head_z , min_cutoff=min_cutoff, beta=beta) 
+            filtered_head_z = one_euro_filter(time.time(), head_z )
+            filtered_head_z = ema_filter(filtered_head_z)
             
-            d3 = d2
-            d2 = d1
-            d1 = head_z
-            d1 = (d1 + d2 + d3) / 3 
-            head_z = d1
- 
-            #head movement
-            #replaced screen.get_x() with image rect.Problem when image res will be lower than screen 
+            #head movement 
             #when looking left we want the image to go right
-            offset_x = (head_x - image_rect.width // 2) * 0.7 
-            offset_y = (head_y - image_rect.height // 2) * 0.7
+            offset_x = (head_x - (image_rect.width // 2)) * 0.7 
+            offset_y = (head_y - (image_rect.height // 2)) * 0.7
              
-            #set minimum as 1 so it doesnt zoom out more than the image
-            z_scale_factor = max(1,np.round(head_z/base_z,5))  
-     
+            #set minimum so it doesnt zoom out more than the image
+            #optimal minimum depends on image size
+            z_scale_factor = max(0.8,np.round(filtered_head_z/base_z,7))  
+    
             scaled_width = int(image_rect.width * z_scale_factor)   
-            scaled_height = int(image_rect.height * z_scale_factor)
-        
+            scaled_height = int(image_rect.height * z_scale_factor)        
             scaled_image = pygame.transform.scale_by(window_image, z_scale_factor)
-            scaled_rect = scaled_image.get_rect(center=(1920 // 2, 1280 // 2)) 
-        
-            #replaced screen dims but reduces fov
+            scaled_rect = scaled_image.get_rect(center=(screen.get_width() // 2, screen.get_height() // 2)) 
+            
+            #try parentheses before //2
             image_x = ((image_rect.width - scaled_width) // 2)  + int(offset_x)
             image_y = ((image_rect.height  - scaled_height) // 2) + int(offset_y)
                      
@@ -148,20 +155,23 @@ def main():
 
  
 if __name__ == "__main__":    
-    #pygame top left corner is 0,0
+    #inits pygame when we run --help
     pygame.init()
     flags= pygame.FULLSCREEN | pygame.RESIZABLE
     pygame.display.set_caption("Virtual Window")
     screen = pygame.display.set_mode((0,0), flags) #fit native resolution 
     window_image = pygame.image.load(argument_handler().i).convert_alpha()   
+    #scale image to fit screen if different size
+    #window_image = pygame.transform.scale(window_image,(screen.get_width() + 500, screen.get_height()+500))
+    
     #get image dimensions and center it in the middle of the screen
     image_rect = window_image.get_rect(center=(screen.get_width() // 2,screen.get_height() // 2))   
      
     #cv.x = width height image.shape = height, width(cv2 uses numpy for this)
-    img = cv2.imread(argument_handler().i, flags = cv2.CV_8UC4) 
-    depth_map = cv2.imread('depth.png')
-    depth_map = cv2.cvtColor(depth_map,cv2.COLOR_RGB2GRAY)
-    img = cv2.resize(img, np.flip(depth_map.shape[:2])) #height, width need to flip, ignore channel 3  
+    #img = cv2.imread(argument_handler().i, flags = cv2.CV_8UC4) 
+    #depth_map = cv2.imread('depth.png')
+    #depth_map = cv2.cvtColor(depth_map,cv2.COLOR_RGB2GRAY)
+    #img = cv2.resize(img, np.flip(depth_map.shape[:2])) #height, width need to flip, ignore channel 3  
     #layers = get_depth_layers(depth_map) # maybe it crashes beause it was in a while loop 
     main()
 
